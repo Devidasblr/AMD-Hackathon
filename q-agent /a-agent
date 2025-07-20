@@ -1,0 +1,174 @@
+# q_agent.py
+
+import json
+import argparse
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from tqdm import tqdm
+import os
+
+# Load topics
+def load_topics(path="assets/topics.json"):
+    with open(path, "r") as f:
+        return json.load(f)
+
+# Build prompt based on topic
+def build_prompt(category, sub_topic, description):
+    return f"""
+You are a logic puzzle question generator.
+
+Category: {category}
+Sub-topic: {sub_topic}
+Description: {description}
+
+Generate one high-quality, self-contained logical reasoning question that fits this topic. Avoid ambiguity. Do not repeat questions.
+
+Output only the question text. No answers or explanations.
+"""
+
+# Generate questions using Qwen3-4B
+def generate_questions(topics, model, tokenizer, num_questions=5):
+    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, device_map="auto")
+
+    questions = []
+    count = 0
+
+    for category, subtopics in topics.items():
+        for sub in subtopics:
+            sub_topic = list(sub.keys())[0]
+            description = sub[sub_topic]
+
+            for _ in range(num_questions):
+                prompt = build_prompt(category, sub_topic, description)
+                output = pipe(prompt, max_new_tokens=256, do_sample=True, temperature=0.9, top_k=50)[0]['generated_text']
+
+                # Simple quality filter: non-empty, reasonably long, no hallucination keywords
+                question = output.split("Output only the question text. No answers or explanations.")[-1].strip()
+                if 30 < len(question) < 400 and "Answer" not in question:
+                    questions.append({
+                        "category": category,
+                        "sub_topic": sub_topic,
+                        "question": question.strip()
+                    })
+
+                count += 1
+
+    return questions
+
+# Save questions to JSON
+def save_questions(questions, path="output/questions.json"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(questions, f, indent=4)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--num_questions', type=int, default=3, help='Number of questions per sub-topic')
+    args = parser.parse_args()
+
+    topics = load_topics()
+    model_name = "Qwen/Qwen1.5-4B-Chat"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
+
+    questions = generate_questions(topics, model, tokenizer, num_questions=args.num_questions)
+    save_questions(questions)
+
+    print(f"✅ Generated and saved {len(questions)} questions to output/questions.json")
+
+if __name__ == "__main__":
+    main()
+
+
+#Sample Input: questions.json
+
+[
+  {
+    "question": "Who is sitting directly opposite to Rahul?",
+    "options": ["Priya", "Anil", "Sneha", "Varun"],
+    "answer": "Priya"
+  },
+  {
+    "question": "If John is a liar and says Sam is honest, what can be said about Sam?",
+    "options": ["Sam is a liar", "Sam is honest", "Cannot be determined", "John is honest"],
+    "answer": "Sam is a liar"
+  }
+]
+
+#a_agent.py — First Version
+# a_agent.py
+
+import json
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from tqdm import tqdm
+
+def format_prompt(question_obj: dict) -> str:
+    q = question_obj["question"]
+    opts = question_obj["options"]
+    prompt = f"""Answer the following logical reasoning multiple-choice question.
+
+Question: {q}
+Options:
+A. {opts[0]}
+B. {opts[1]}
+C. {opts[2]}
+D. {opts[3]}
+
+Choose the correct option (A, B, C, or D) and explain your reasoning in 1-2 lines."""
+    return prompt
+
+def extract_answer(text: str) -> str:
+    # Try to extract the selected option letter (A, B, C, or D)
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Answer:"):
+            for opt in ['A', 'B', 'C', 'D']:
+                if opt in line:
+                    return opt
+    return "Unknown"
+
+def main():
+    # Load Qwen3-4B model
+    model_name = "Qwen/Qwen1.5-4B-Chat"  # Replace with Qwen3-4B if available
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, device_map='auto')
+    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+
+    # Load questions
+    with open("questions.json", "r") as f:
+        questions = json.load(f)
+
+    answers = []
+
+    for q in tqdm(questions):
+        prompt = format_prompt(q)
+        response = pipe(prompt, max_new_tokens=256, temperature=0.7, do_sample=False)[0]["generated_text"]
+
+        selected = extract_answer(response)
+        answers.append({
+            "question": q["question"],
+            "generated_answer": selected,
+            "options": q["options"],
+            "actual_answer": q["answer"],
+            "response": response.strip()
+        })
+
+    # Save the A-agent’s output
+    with open("answers.json", "w") as f:
+        json.dump(answers, f, indent=2)
+
+    print(f"Answered {len(answers)} questions. Output saved to answers.json")
+
+if __name__ == "__main__":
+    main()
+
+#Example Output (answers.json)
+[
+  {
+    "question": "Who is sitting directly opposite to Rahul?",
+    "generated_answer": "A",
+    "options": ["Priya", "Anil", "Sneha", "Varun"],
+    "actual_answer": "Priya",
+    "response": "Answer: A. Priya\nBecause opposite pairs in seating are..."
+  }
+]
